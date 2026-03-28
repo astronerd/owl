@@ -1,0 +1,4 @@
+feishu-tui
+.env
+*.pyc
+__pycache__/
