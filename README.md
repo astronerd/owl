@@ -1,4 +1,4 @@
-# feishu-tui
+# owl
 
 Terminal client for Feishu/Lark, built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
@@ -38,9 +38,9 @@ Read and send messages as yourself, directly from the terminal.
 1. Clone and build:
 
 ```bash
-git clone https://github.com/astronerd/feishu-tui.git
-cd feishu-tui
-go build -o feishu-tui .
+git clone https://github.com/astronerd/owl.git
+cd owl
+go build -o owl .
 ```
 
 2. Configure environment variables:
@@ -60,14 +60,14 @@ lark-cli auth login --recommend
 4. Login for message sending (one-time, token auto-refreshes):
 
 ```bash
-cd ~/feishu-tui  # the Python helper directory
+cd ~/owl  # the Python helper directory
 FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx python3 app.py --login
 ```
 
 5. Run:
 
 ```bash
-FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./feishu-tui
+FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./owl
 ```
 
 ## Keybindings
@@ -107,7 +107,7 @@ FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./feishu-tui
 - **Go + Bubble Tea**: TUI rendering and interaction
 - **lark-cli**: Feishu API calls for reading chats and messages (via `--as user`)
 - **rasterm**: Kitty graphics protocol for inline image preview
-- **Python helper** (`~/feishu-tui/feishu_api.py`): OAuth token management and message sending (works around lark-cli's `api POST --as user` bug)
+- **Python helper** (`~/owl/feishu_api.py`): OAuth token management and message sending (works around lark-cli's `api POST --as user` bug)
 
 ## License
 

@@ -214,7 +214,7 @@ func sendMessage(chatID, text string) error {
 	// Pass text via stdin to avoid shell escaping issues
 	script := `
 import sys, os, json
-sys.path.insert(0, os.path.expanduser("~/feishu-tui"))
+sys.path.insert(0, os.path.expanduser("~/owl"))
 os.environ["FEISHU_APP_ID"] = os.environ.get("FEISHU_APP_ID", "")
 os.environ["FEISHU_APP_SECRET"] = os.environ.get("FEISHU_APP_SECRET", "")
 from feishu_api import send_message

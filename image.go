@@ -16,7 +16,7 @@ import (
 	"github.com/BourgeoisBear/rasterm"
 )
 
-var imageCacheDir = filepath.Join(os.TempDir(), "feishu-tui-images")
+var imageCacheDir = filepath.Join(os.TempDir(), "owl-images")
 
 func init() {
 	os.MkdirAll(imageCacheDir, 0755)
