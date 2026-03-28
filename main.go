@@ -137,7 +137,11 @@ func initialModel() model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadChats, tea.WindowSize(), tea.EnableMouseAllMotion, m.spin.Tick,
+	loader := loadChats
+	if demoMode {
+		loader = loadDemoChats
+	}
+	return tea.Batch(tea.Cmd(loader), tea.WindowSize(), tea.EnableMouseAllMotion, m.spin.Tick,
 		tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }))
 }
 
@@ -147,6 +151,9 @@ func loadChats() tea.Msg {
 }
 
 func loadMsgs(id string, isOpen bool) tea.Cmd {
+	if demoMode {
+		return loadDemoMsgs(id)
+	}
 	return func() tea.Msg { return msgsLoaded{id, getMessagesPaged(id, 30), isOpen} }
 }
 
@@ -190,28 +197,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.chats = msg.chats
 		m.allChats = msg.chats
-		m.myOpenID = getMyOpenID()
-		var cmds []tea.Cmd
-		for _, c := range m.chats {
-			if c.ID != "" {
-				cmds = append(cmds, loadLastMsg(c.ID))
+		if demoMode {
+			m.myOpenID = "u1"
+		} else {
+			m.myOpenID = getMyOpenID()
+			var cmds []tea.Cmd
+			for _, c := range m.chats {
+				if c.ID != "" {
+					cmds = append(cmds, loadLastMsg(c.ID))
+				}
 			}
+			return m, tea.Batch(cmds...)
 		}
-		return m, tea.Batch(cmds...)
 	case tickMsg:
 		m.tickCount++
 		cmds := []tea.Cmd{
 			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }),
 		}
-		// Auto-refresh active chat messages every tick (5s)
-		if m.activeChatID != "" && !m.loadingMsgs {
-			cmds = append(cmds, loadMsgs(m.activeChatID, false))
-		}
-		// Refresh last messages for badge detection every 6th tick (30s)
-		if m.tickCount%6 == 0 {
-			for _, c := range m.chats {
-				if c.ID != "" {
-					cmds = append(cmds, loadLastMsg(c.ID))
+		if !demoMode {
+			if m.activeChatID != "" && !m.loadingMsgs {
+				cmds = append(cmds, loadMsgs(m.activeChatID, false))
+			}
+			if m.tickCount%6 == 0 {
+				for _, c := range m.chats {
+					if c.ID != "" {
+						cmds = append(cmds, loadLastMsg(c.ID))
+					}
 				}
 			}
 		}
@@ -1026,10 +1037,77 @@ func mergeMessages(old, new []Message) []Message {
 }
 
 
+var demoMode bool
+
 func main() {
+	for _, a := range os.Args[1:] {
+		if a == "--demo" {
+			demoMode = true
+		}
+	}
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func loadDemoChats() tea.Msg {
+	chats := []Chat{
+		{ID: "d1", Name: "Alex Chen", Mode: "p2p", LastMsg: "刚部署完，你看下日志", LastTime: "2026-03-29 10:42"},
+		{ID: "d2", Name: "Sarah Wang", Mode: "p2p", LastMsg: "明天 standup 改 10 点", LastTime: "2026-03-29 10:15"},
+		{ID: "d3", Name: "基础架构组", Mode: "group", LastMsg: "Kevin: CI 挂了，在修", LastTime: "2026-03-29 09:58"},
+		{ID: "d4", Name: "owl 开发群", Mode: "group", LastMsg: "终于能在终端看飞书了", LastTime: "2026-03-29 09:30"},
+		{ID: "d5", Name: "Mike Li", Mode: "p2p", LastMsg: "收到，我看看", LastTime: "2026-03-29 08:47"},
+		{ID: "d6", Name: "产品需求讨论", Mode: "group", LastMsg: "Jenny: 原型图更新了", LastTime: "2026-03-28 22:10"},
+		{ID: "d7", Name: "Release 管理", Mode: "group", LastMsg: "v2.4.1 已发布", LastTime: "2026-03-28 18:30"},
+		{ID: "d8", Name: "David Zhang", Mode: "p2p", LastMsg: "周末打球不", LastTime: "2026-03-28 17:05"},
+		{ID: "d9", Name: "后端技术分享", Mode: "group", LastMsg: "分享录屏已上传", LastTime: "2026-03-28 16:00"},
+		{ID: "d10", Name: "Lisa Zhao", Mode: "p2p", LastMsg: "报销单帮我审一下", LastTime: "2026-03-27 14:22"},
+		{ID: "d11", Name: "SRE On-Call", Mode: "group", LastMsg: "告警已恢复", LastTime: "2026-03-27 11:00"},
+		{ID: "d12", Name: "新人 Onboarding", Mode: "group", LastMsg: "欢迎 @Tom 加入团队!", LastTime: "2026-03-26 09:15"},
+	}
+	return chatsLoaded{chats: chats}
+}
+
+func loadDemoMsgs(chatID string) tea.Cmd {
+	return func() tea.Msg {
+		msgSets := map[string][]Message{
+			"d1": {
+				{ID: "m1", Sender: "Alex Chen", SenderID: "u2", SenderType: "user", Content: "线上那个 OOM 的问题，我查了下是连接池泄漏", MsgType: "text", Time: "2026-03-29 10:30"},
+				{ID: "m2", Sender: "You", SenderID: "u1", SenderType: "user", Content: "哪个服务？", MsgType: "text", Time: "2026-03-29 10:31"},
+				{ID: "m3", Sender: "Alex Chen", SenderID: "u2", SenderType: "user", Content: "gateway，已经提了 PR 你 review 下\nhttps://github.com/example/gateway/pull/342", MsgType: "text", Time: "2026-03-29 10:33"},
+				{ID: "m4", Sender: "You", SenderID: "u1", SenderType: "user", Content: "好 我看看", MsgType: "text", Time: "2026-03-29 10:34"},
+				{ID: "m5", Sender: "Alex Chen", SenderID: "u2", SenderType: "user", Content: "顺便说下，monitoring dashboard 也加了个面板\nhttps://d3syobfnd3.feishu.cn/wiki/Kx8bwGz1RiPQmTk5Lb2c 这个文档里有说明", MsgType: "text", Time: "2026-03-29 10:38"},
+				{ID: "m6", Sender: "You", SenderID: "u1", SenderType: "user", Content: "可以，刚部署完了吗", MsgType: "text", Time: "2026-03-29 10:40"},
+				{ID: "m7", Sender: "Alex Chen", SenderID: "u2", SenderType: "user", Content: "刚部署完，你看下日志", MsgType: "text", Time: "2026-03-29 10:42"},
+			},
+			"d3": {
+				{ID: "m10", Sender: "Kevin Wu", SenderID: "u3", SenderType: "user", Content: "大家注意下，staging 环境数据库要做迁移，今天下午 3 点", MsgType: "text", Time: "2026-03-29 09:10"},
+				{ID: "m11", Sender: "Jenny Liu", SenderID: "u4", SenderType: "user", Content: "收到，需要停服吗", MsgType: "text", Time: "2026-03-29 09:12"},
+				{ID: "m12", Sender: "Kevin Wu", SenderID: "u3", SenderType: "user", Content: "不用，online migration", MsgType: "text", Time: "2026-03-29 09:13"},
+				{ID: "m13", Sender: "You", SenderID: "u1", SenderType: "user", Content: "migration script review 过了吗", MsgType: "text", Time: "2026-03-29 09:20"},
+				{ID: "m14", Sender: "Kevin Wu", SenderID: "u3", SenderType: "user", Content: "[Image: img_demo_architecture]", MsgType: "text", Time: "2026-03-29 09:25"},
+				{ID: "m15", Sender: "Kevin Wu", SenderID: "u3", SenderType: "user", Content: "这是架构图，已经 review 过了", MsgType: "text", Time: "2026-03-29 09:26"},
+				{ID: "m16", Sender: "Alex Chen", SenderID: "u2", SenderType: "user", Content: "LGTM", MsgType: "text", Time: "2026-03-29 09:30"},
+				{ID: "m17", Sender: "Kevin Wu", SenderID: "u3", SenderType: "user", Content: "CI 挂了，在修", MsgType: "text", Time: "2026-03-29 09:58"},
+			},
+			"d4": {
+				{ID: "m20", Sender: "You", SenderID: "u1", SenderType: "user", Content: "大家好，owl 第一版做好了", MsgType: "text", Time: "2026-03-29 09:00"},
+				{ID: "m21", Sender: "Sarah Wang", SenderID: "u5", SenderType: "user", Content: "什么是 owl?", MsgType: "text", Time: "2026-03-29 09:02"},
+				{ID: "m22", Sender: "You", SenderID: "u1", SenderType: "user", Content: "一个飞书 TUI 客户端，在终端里直接收发消息", MsgType: "text", Time: "2026-03-29 09:03"},
+				{ID: "m23", Sender: "Mike Li", SenderID: "u6", SenderType: "user", Content: "卧槽 还能看图片？", MsgType: "text", Time: "2026-03-29 09:10"},
+				{ID: "m24", Sender: "You", SenderID: "u1", SenderType: "user", Content: "对 用 Kitty 图形协议，Ghostty 直接支持", MsgType: "text", Time: "2026-03-29 09:12"},
+				{ID: "m25", Sender: "David Zhang", SenderID: "u7", SenderType: "user", Content: "飞书文档链接也能直接点开？", MsgType: "text", Time: "2026-03-29 09:15"},
+				{ID: "m26", Sender: "You", SenderID: "u1", SenderType: "user", Content: "能，会自动解析文档标题显示成 pill\nhttps://d3syobfnd3.feishu.cn/wiki/DemoDoc123 像这样", MsgType: "text", Time: "2026-03-29 09:18"},
+				{ID: "m27", Sender: "Lisa Zhao", SenderID: "u8", SenderType: "user", Content: "终于能在终端看飞书了", MsgType: "text", Time: "2026-03-29 09:30"},
+			},
+		}
+		if msgs, ok := msgSets[chatID]; ok {
+			return msgsLoaded{chatID, msgs, true}
+		}
+		return msgsLoaded{chatID, []Message{
+			{ID: "m99", Sender: "System", SenderType: "system", Content: "暂无消息", MsgType: "text", Time: "2026-03-29 00:00"},
+		}, true}
 	}
 }
