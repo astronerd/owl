@@ -22,20 +22,50 @@ Read and send messages as yourself, directly from the terminal.
 ## Prerequisites
 
 - Go 1.23+
-- [lark-cli](https://github.com/larksuite/cli) installed and configured (`npm install -g @larksuite/cli`)
+- Node.js (for installing lark-cli)
 - Python 3 (for user token management / message sending)
 - A terminal with Kitty graphics protocol support (Ghostty, Kitty, WezTerm) for image preview
-- A Feishu self-built app with the following scopes enabled:
-  - `im:message.send_as_user`
-  - `im:message`
-  - `im:chat:read`
-  - `im:message:readonly`
-  - `offline_access`
-- Redirect URL `http://localhost:19980/callback` configured in your Feishu app's security settings
 
 ## Setup
 
-1. Clone and build:
+### 1. Install and configure lark-cli
+
+[lark-cli](https://github.com/larksuite/cli) is the official Feishu/Lark CLI tool. owl uses it for all API calls.
+
+```bash
+npm install -g @larksuite/cli
+```
+
+Initialize and login:
+
+```bash
+lark-cli config init
+lark-cli auth login --recommend
+```
+
+### 2. Create a Feishu self-built app
+
+Go to [Feishu Open Platform](https://open.feishu.cn/app) and create a new app. Then add the following permissions under **Permissions & Scopes**:
+
+| Permission | Description |
+|-----------|-------------|
+| `im:message` | Read and send messages |
+| `im:message:readonly` | Read message content |
+| `im:message.send_as_user` | Send messages as user identity |
+| `im:chat:read` | Read chat list |
+| `im:resource` | Download images and files |
+| `contact:user.search:readonly` | Search contacts |
+| `offline_access` | Long-lived refresh token |
+
+After adding permissions, go to your app's **Security Settings** and add the redirect URL:
+
+```
+http://localhost:19980/callback
+```
+
+Then publish the app version and have your admin approve the permissions.
+
+### 3. Clone and build
 
 ```bash
 git clone https://github.com/astronerd/owl.git
@@ -43,28 +73,23 @@ cd owl
 go build -o owl .
 ```
 
-2. Configure environment variables:
+### 4. Configure credentials
 
 ```bash
 cp .env.example .env
-# Edit .env with your Feishu app credentials
+# Edit .env with your App ID and App Secret from the Feishu app dashboard
 ```
 
-3. Set up lark-cli authentication:
+### 5. Login for message sending
 
-```bash
-lark-cli config init
-lark-cli auth login --recommend
-```
-
-4. Login for message sending (one-time, token auto-refreshes):
+The first time, run the OAuth login flow (token auto-refreshes after this):
 
 ```bash
 cd ~/owl  # the Python helper directory
 FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx python3 app.py --login
 ```
 
-5. Run:
+### 6. Run
 
 ```bash
 FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./owl
