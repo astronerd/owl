@@ -434,8 +434,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.focus = focusMessages
 			m.previewImgPath = ""
 			viewPreviewStr = ""
-			// Write delete command to clear Kitty image overlay
-			fmt.Fprint(os.Stdout, "\x1b_Ga=d\x1b\\")
 		}
 		return m, nil
 	case focusInput:
@@ -781,12 +779,8 @@ func (m model) View() string {
 		output.WriteString(l + r + "\n")
 	}
 	output.WriteString(m.helpBar())
-	// Clear Kitty images when in preview mode (prevent stale overlays)
-	prefix := ""
-	if m.focus == focusImagePreview {
-		prefix = "\x1b_Ga=d\x1b\\"
-	}
-	return prefix + output.String()
+	// Always clear Kitty image overlays before rendering (prevents stale images)
+	return "\x1b_Ga=d\x1b\\" + output.String()
 }
 
 // renderBox draws a rounded border box with optional title in the top border.
