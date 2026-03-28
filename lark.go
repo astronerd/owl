@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -23,12 +24,13 @@ func runLarkCLI(args ...string) (map[string]interface{}, error) {
 }
 
 type Chat struct {
-	ID       string
-	Name     string
-	Mode     string // "group" or "p2p"
-	LastMsg  string
-	LastTime string
-	UserID   string // for p2p search results
+	ID        string
+	Name      string
+	Mode      string // "group" or "p2p"
+	LastMsg   string
+	LastTime  string
+	LastMsgID string
+	UserID    string // for p2p search results
 }
 
 type Message struct {
@@ -123,17 +125,10 @@ func getP2PChats(myOpenID string, limit int) []Chat {
 			continue
 		}
 
-		lastMsg := str(m, "content")
-		if len(lastMsg) > 30 {
-			lastMsg = lastMsg[:30]
-		}
-
 		chats = append(chats, Chat{
-			ID:       chatID,
-			Name:     name,
-			Mode:     "p2p",
-			LastMsg:  lastMsg,
-			LastTime: str(m, "create_time"),
+			ID:   chatID,
+			Name: name,
+			Mode: "p2p",
 		})
 		if len(chats) >= limit {
 			break
@@ -216,17 +211,26 @@ func getMessagesPaged(chatID string, limit int) []Message {
 
 func sendMessage(chatID, text string) error {
 	// Use Python helper for sending (user token managed there)
-	cmd := exec.Command("python3", "-c", `
-import sys, os
+	// Pass text via stdin to avoid shell escaping issues
+	script := `
+import sys, os, json
 sys.path.insert(0, os.path.expanduser("~/feishu-tui"))
-os.environ["FEISHU_APP_ID"] = "`+appID+`"
-os.environ["FEISHU_APP_SECRET"] = "`+appSecret+`"
+os.environ["FEISHU_APP_ID"] = os.environ.get("FEISHU_APP_ID", "")
+os.environ["FEISHU_APP_SECRET"] = os.environ.get("FEISHU_APP_SECRET", "")
 from feishu_api import send_message
-r = send_message("`+chatID+`", """`+strings.ReplaceAll(text, `"`, `\"`)+`""")
+args = json.loads(sys.stdin.read())
+r = send_message(args["chat_id"], args["text"])
 if r.get("code") != 0:
     print(r.get("msg","error"), file=sys.stderr)
     sys.exit(1)
-`)
+`
+	payload, _ := json.Marshal(map[string]string{"chat_id": chatID, "text": text})
+	cmd := exec.Command("python3", "-c", script)
+	cmd.Stdin = strings.NewReader(string(payload))
+	cmd.Env = append(os.Environ(),
+		"FEISHU_APP_ID="+appID,
+		"FEISHU_APP_SECRET="+appSecret,
+	)
 	return cmd.Run()
 }
 
@@ -252,6 +256,76 @@ func searchUsers(query string) []Chat {
 		})
 	}
 	return chats
+}
+
+func getMergeForwardMessages(messageID string) []Message {
+	r, err := runLarkCLI("im", "+messages-read", "--as", "user",
+		"--message-id", messageID, "--format", "json")
+	if err != nil {
+		return nil
+	}
+	data, _ := r["data"].(map[string]interface{})
+	items, _ := data["items"].([]interface{})
+
+	var msgs []Message
+	for _, item := range items {
+		m, _ := item.(map[string]interface{})
+		sender, _ := m["sender"].(map[string]interface{})
+		msgs = append(msgs, Message{
+			ID:         str(m, "message_id"),
+			Sender:     str(sender, "name"),
+			SenderID:   str(sender, "id"),
+			SenderType: str(sender, "sender_type"),
+			Content:    str(m, "content"),
+			MsgType:    str(m, "msg_type"),
+			Time:       str(m, "create_time"),
+		})
+	}
+	return msgs
+}
+
+func getDocTitle(docToken, docType string) string {
+	// Try docx/doc meta API
+	path := "/open-apis/docx/v1/documents/" + docToken
+	if docType == "wiki" {
+		// For wiki, get node info first
+		params, _ := json.Marshal(map[string]string{"token": docToken})
+		r, err := runLarkCLI("api", "GET", "/open-apis/wiki/v2/spaces/get_node",
+			"--as", "user", "--params", string(params))
+		if err == nil {
+			if data, ok := r["data"].(map[string]interface{}); ok {
+				if node, ok := data["node"].(map[string]interface{}); ok {
+					if t := str(node, "title"); t != "" {
+						return t
+					}
+				}
+			}
+		}
+		return ""
+	}
+	if docType == "sheet" {
+		path = "/open-apis/sheets/v3/spreadsheets/" + docToken
+	}
+	r, err := runLarkCLI("api", "GET", path, "--as", "user")
+	if err != nil {
+		return ""
+	}
+	if data, ok := r["data"].(map[string]interface{}); ok {
+		if doc, ok := data["document"].(map[string]interface{}); ok {
+			if t := str(doc, "title"); t != "" {
+				return t
+			}
+		}
+		if ss, ok := data["spreadsheet"].(map[string]interface{}); ok {
+			if t := str(ss, "title"); t != "" {
+				return t
+			}
+		}
+		if t := str(data, "title"); t != "" {
+			return t
+		}
+	}
+	return ""
 }
 
 // helpers

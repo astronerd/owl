@@ -12,8 +12,11 @@ Read and send messages as yourself, directly from the terminal.
 - Group chats and P2P conversations in one list, sorted by recent activity
 - Send messages as your own identity (not a bot)
 - Search chats and contacts
-- Pin/unpin conversations locally
-- Keyboard-driven with mouse support
+- Auto-refresh messages and new message badges
+- Image preview using Kitty graphics protocol (Ghostty, Kitty, WezTerm)
+- Clickable document links with title resolution (`[wiki: Doc Title]`)
+- Merged forward message expansion
+- Keyboard-driven with full mouse support
 - Lazygit-style transparent TUI
 
 ## Prerequisites
@@ -21,6 +24,7 @@ Read and send messages as yourself, directly from the terminal.
 - Go 1.23+
 - [lark-cli](https://github.com/larksuite/cli) installed and configured (`npm install -g @larksuite/cli`)
 - Python 3 (for user token management / message sending)
+- A terminal with Kitty graphics protocol support (Ghostty, Kitty, WezTerm) for image preview
 - A Feishu self-built app with the following scopes enabled:
   - `im:message.send_as_user`
   - `im:message`
@@ -34,7 +38,7 @@ Read and send messages as yourself, directly from the terminal.
 1. Clone and build:
 
 ```bash
-git clone https://github.com/gengdawei/feishu-tui.git
+git clone https://github.com/astronerd/feishu-tui.git
 cd feishu-tui
 go build -o feishu-tui .
 ```
@@ -71,7 +75,7 @@ FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./feishu-tui
 ### Chat list
 | Key | Action |
 |-----|--------|
-| `j/k` | Navigate up/down |
+| `↑/↓` | Navigate up/down |
 | `Enter` | Open chat |
 | `/` | Search chats & contacts |
 | `r` | Refresh |
@@ -80,10 +84,17 @@ FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./feishu-tui
 ### Messages
 | Key | Action |
 |-----|--------|
-| `j/k` | Scroll messages |
+| `↑/↓` | Scroll messages |
 | `i` / `Enter` | Start typing |
 | `Esc` | Back to chat list |
 | `r` | Refresh messages |
+| Click `[image]` | Preview image |
+| Click `[doc]` / `[wiki]` | Open in browser |
+
+### Image preview
+| Key | Action |
+|-----|--------|
+| `Esc` | Back to messages |
 
 ### Input
 | Key | Action |
@@ -95,6 +106,7 @@ FEISHU_APP_ID=xxx FEISHU_APP_SECRET=xxx ./feishu-tui
 
 - **Go + Bubble Tea**: TUI rendering and interaction
 - **lark-cli**: Feishu API calls for reading chats and messages (via `--as user`)
+- **rasterm**: Kitty graphics protocol for inline image preview
 - **Python helper** (`~/feishu-tui/feishu_api.py`): OAuth token management and message sending (works around lark-cli's `api POST --as user` bug)
 
 ## License

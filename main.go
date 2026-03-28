@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -28,10 +31,20 @@ var (
 	dimStyle  = lipgloss.NewStyle().Foreground(dim)
 	helpKey   = lipgloss.NewStyle().Foreground(yellow)
 
+	redDot   = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true).Render("●")
 	greenDot = lipgloss.NewStyle().Foreground(green).Render("●")
 	blueDot  = lipgloss.NewStyle().Foreground(blue).Render("●")
 	greenBar = lipgloss.NewStyle().Foreground(green).Render("│")
 	blueBar  = lipgloss.NewStyle().Foreground(blue).Render("│")
+)
+
+// Package-level state set by View(), read by Update() for click handling.
+// View() is a value receiver so model mutations there don't persist.
+var (
+	viewMsgLineLinks []string
+	viewImgRendered  = make(map[string]string)
+	viewImgRows      = make(map[string]int)
+	viewPreviewStr   string
 )
 
 type focus int
@@ -41,18 +54,32 @@ const (
 	focusMessages
 	focusInput
 	focusSearch
+	focusImagePreview
 )
 
 // --- tea messages ---
 
 type chatsLoaded struct{ chats []Chat }
 type msgsLoaded struct {
-	chatID string
-	msgs   []Message
+	chatID  string
+	msgs    []Message
+	isOpen  bool // true when user explicitly opened chat (not auto-refresh)
 }
 type msgSent struct{ chatID string }
 type lastMsgLoaded struct {
-	chatID, lastMsg, lastTime string
+	chatID, lastMsg, lastTime, lastMsgID string
+}
+type tickMsg time.Time
+type imageReady struct {
+	messageID string
+	path      string
+}
+type mergeForwardLoaded struct {
+	messageID string
+	msgs      []Message
+}
+type docTitleReady struct {
+	token, title string
 }
 
 // --- model ---
@@ -73,6 +100,16 @@ type model struct {
 	searching      bool
 	loading        bool
 	loadingMsgs    bool
+	lastSeenMsgID  map[string]string // chatID -> msgID when user last opened
+	hasNewMsg      map[string]bool   // chatID -> has unread
+	tickCount      int
+	imgCache       map[string]string     // messageID -> file path
+	imgLoading     map[string]bool       // messageID -> downloading
+	mergeCache     map[string][]Message  // messageID -> sub-messages
+	mergeLoading   map[string]bool       // messageID -> loading
+	docTitleCache  map[string]string     // docToken -> title
+	docTitleLoading map[string]bool
+	previewImgPath string                // image path for full preview
 }
 
 func initialModel() model {
@@ -88,11 +125,22 @@ func initialModel() model {
 
 	appID = os.Getenv("FEISHU_APP_ID")
 	appSecret = os.Getenv("FEISHU_APP_SECRET")
-	return model{input: ti, search: si, spin: sp, loading: true}
+	return model{
+		input: ti, search: si, spin: sp, loading: true,
+		lastSeenMsgID: make(map[string]string),
+		hasNewMsg:     make(map[string]bool),
+		imgCache:        make(map[string]string),
+		imgLoading:      make(map[string]bool),
+		mergeCache:      make(map[string][]Message),
+		mergeLoading:    make(map[string]bool),
+		docTitleCache:   make(map[string]string),
+		docTitleLoading: make(map[string]bool),
+	}
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(loadChats, tea.WindowSize(), tea.EnableMouseAllMotion, m.spin.Tick)
+	return tea.Batch(loadChats, tea.WindowSize(), tea.EnableMouseAllMotion, m.spin.Tick,
+		tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }))
 }
 
 func loadChats() tea.Msg {
@@ -100,8 +148,8 @@ func loadChats() tea.Msg {
 	return chatsLoaded{chats: append(getP2PChats(myID, 10), getChatList(30)...)}
 }
 
-func loadMsgs(id string) tea.Cmd {
-	return func() tea.Msg { return msgsLoaded{id, getMessagesPaged(id, 30)} }
+func loadMsgs(id string, isOpen bool) tea.Cmd {
+	return func() tea.Msg { return msgsLoaded{id, getMessagesPaged(id, 30), isOpen} }
 }
 
 func loadLastMsg(id string) tea.Cmd {
@@ -124,7 +172,7 @@ func loadLastMsg(id string) tea.Cmd {
 			if len(r) > 35 {
 				p = string(r[:35])
 			}
-			return lastMsgLoaded{id, p, m.Time}
+			return lastMsgLoaded{id, p, m.Time, m.ID}
 		}
 		return lastMsgLoaded{chatID: id}
 	}
@@ -152,28 +200,133 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+	case tickMsg:
+		m.tickCount++
+		cmds := []tea.Cmd{
+			tea.Tick(10*time.Second, func(t time.Time) tea.Msg { return tickMsg(t) }),
+		}
+		// Auto-refresh active chat messages every tick (5s)
+		if m.activeChatID != "" && !m.loadingMsgs {
+			cmds = append(cmds, loadMsgs(m.activeChatID, false))
+		}
+		// Refresh last messages for badge detection every 6th tick (30s)
+		if m.tickCount%6 == 0 {
+			for _, c := range m.chats {
+				if c.ID != "" {
+					cmds = append(cmds, loadLastMsg(c.ID))
+				}
+			}
+		}
+		return m, tea.Batch(cmds...)
 	case lastMsgLoaded:
 		for i := range m.chats {
 			if m.chats[i].ID == msg.chatID && msg.lastMsg != "" {
+				// Badge: new message if msgID changed and chat is not currently active
+				if msg.lastMsgID != "" && m.chats[i].LastMsgID != "" &&
+					msg.lastMsgID != m.chats[i].LastMsgID &&
+					msg.chatID != m.activeChatID {
+					m.hasNewMsg[msg.chatID] = true
+				}
 				m.chats[i].LastMsg = msg.lastMsg
 				m.chats[i].LastTime = msg.lastTime
+				m.chats[i].LastMsgID = msg.lastMsgID
 			}
 		}
 		for i := range m.allChats {
 			if m.allChats[i].ID == msg.chatID && msg.lastMsg != "" {
+				if msg.lastMsgID != "" && m.allChats[i].LastMsgID != "" &&
+					msg.lastMsgID != m.allChats[i].LastMsgID &&
+					msg.chatID != m.activeChatID {
+					m.hasNewMsg[msg.chatID] = true
+				}
 				m.allChats[i].LastMsg = msg.lastMsg
 				m.allChats[i].LastTime = msg.lastTime
+				m.allChats[i].LastMsgID = msg.lastMsgID
 			}
 		}
 	case msgsLoaded:
 		m.loadingMsgs = false
 		if msg.chatID == m.activeChatID {
-			m.msgs = msg.msgs
-			// auto scroll to bottom
-			m.msgScroll = 999999
+			updated := false
+			if msg.isOpen {
+				m.msgs = mergeMessages(nil, msg.msgs)
+				m.msgScroll = 0
+				updated = true
+			} else if len(msg.msgs) > 0 {
+				newLastID := msg.msgs[len(msg.msgs)-1].ID
+				oldLastID := ""
+				if len(m.msgs) > 0 {
+					oldLastID = m.msgs[len(m.msgs)-1].ID
+				}
+				if newLastID != oldLastID {
+					m.msgs = mergeMessages(m.msgs, msg.msgs)
+					updated = true
+				}
+			}
+			delete(m.hasNewMsg, msg.chatID)
+			// Fire async downloads for images and merge forwards
+			if updated {
+				var cmds []tea.Cmd
+				for _, mg := range m.msgs {
+					if mg.MsgType == "image" && m.imgCache[mg.ID] == "" && !m.imgLoading[mg.ID] {
+						m.imgLoading[mg.ID] = true
+						mid, ik := mg.ID, parseImageKey(mg.Content)
+						if ik != "" {
+							cmds = append(cmds, func() tea.Msg {
+								path, _ := downloadImage(mid, ik)
+								return imageReady{mid, path}
+							})
+						}
+					}
+					if mg.MsgType == "merge_forward" && m.mergeCache[mg.ID] == nil && !m.mergeLoading[mg.ID] {
+						m.mergeLoading[mg.ID] = true
+						mid := mg.ID
+						cmds = append(cmds, func() tea.Msg {
+							return mergeForwardLoaded{mid, getMergeForwardMessages(mid)}
+						})
+					}
+					// Fetch doc titles from URLs in content
+					c := cleanContent(mg.Content, mg.MsgType)
+					for _, u := range urlRe.FindAllString(c, -1) {
+						token, docType := extractDocToken(u)
+						if token != "" && docType != "" && m.docTitleCache[token] == "" && !m.docTitleLoading[token] {
+							m.docTitleLoading[token] = true
+							tk, dt := token, docType
+							cmds = append(cmds, func() tea.Msg {
+								title := getDocTitle(tk, dt)
+								return docTitleReady{tk, title}
+							})
+						}
+					}
+				}
+				if len(cmds) > 0 {
+					return m, tea.Batch(cmds...)
+				}
+			}
+		}
+	case imageReady:
+		m.imgLoading[msg.messageID] = false
+		if msg.path != "" {
+			m.imgCache[msg.messageID] = msg.path
+			// Auto-open preview if user clicked this image
+			if m.previewImgPath == "pending:"+msg.messageID {
+				m.previewImgPath = msg.path
+				viewPreviewStr = ""
+				m.focus = focusImagePreview
+			}
+		}
+	case mergeForwardLoaded:
+		m.mergeLoading[msg.messageID] = false
+		if msg.msgs != nil {
+			m.mergeCache[msg.messageID] = msg.msgs
+		}
+	case docTitleReady:
+		m.docTitleLoading[msg.token] = false
+		if msg.title != "" {
+			m.docTitleCache[msg.token] = msg.title
 		}
 	case msgSent:
-		return m, loadMsgs(msg.chatID)
+		return m, loadMsgs(msg.chatID, false)
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case tea.MouseMsg:
@@ -199,25 +352,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.loadingMsgs = true
 						m.focus = focusMessages
 						m.msgScroll = 0
-						return m, loadMsgs(c.ID)
+						return m, loadMsgs(c.ID, true)
 					}
 				}
 			} else {
 				// Clicked right panel
-				// Check if click is in the input area (bottom 3 rows)
-				msgH := m.h - 6
-				if msg.Y > msgH+1 {
+				if msg.Y >= m.h-5 {
 					m.focus = focusInput
 					m.input.Focus()
 				} else {
 					m.focus = focusMessages
 					m.input.Blur()
+					lineIdx := msg.Y - 1
+					// Find link: exact match first, then ±1
+					var u string
+					for _, li := range []int{lineIdx, lineIdx - 1, lineIdx + 1} {
+						if li >= 0 && li < len(viewMsgLineLinks) && viewMsgLineLinks[li] != "" {
+							u = viewMsgLineLinks[li]
+							break
+						}
+					}
+					if u != "" {
+						if strings.HasPrefix(u, "img:") {
+							parts := strings.SplitN(strings.TrimPrefix(u, "img:"), ":", 2)
+							msgID := parts[0]
+							imgKey := ""
+							if len(parts) > 1 {
+								imgKey = parts[1]
+							}
+							m.focus = focusImagePreview
+							viewPreviewStr = ""
+							if path := m.imgCache[msgID]; path != "" {
+								m.previewImgPath = path
+							} else {
+								m.previewImgPath = "pending:" + msgID
+								if imgKey != "" && !m.imgLoading[msgID] {
+									m.imgLoading[msgID] = true
+									mid, ik := msgID, imgKey
+									return m, tea.Batch(m.spin.Tick, func() tea.Msg {
+										path, _ := downloadImage(mid, ik)
+										return imageReady{mid, path}
+									})
+								}
+							}
+						} else if u != "" {
+							exec.Command("open", u).Start()
+						}
+					}
 				}
 			}
 		}
 	}
 	// Always update spinner when loading
-	if m.loading || m.loadingMsgs {
+	if m.loading || m.loadingMsgs || (m.focus == focusImagePreview && strings.HasPrefix(m.previewImgPath, "pending:")) {
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
@@ -242,6 +429,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	switch m.focus {
+	case focusImagePreview:
+		if k == "esc" || k == "q" {
+			m.focus = focusMessages
+			m.previewImgPath = ""
+			viewPreviewStr = ""
+			// Write delete command to clear Kitty image overlay
+			fmt.Fprint(os.Stdout, "\x1b_Ga=d\x1b\\")
+		}
+		return m, nil
 	case focusInput:
 		switch k {
 		case "enter":
@@ -285,9 +481,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case focusMessages:
 		switch k {
-		case "j", "down":
+		case "up", "k":
 			m.msgScroll++
-		case "k", "up":
+		case "down", "j":
 			if m.msgScroll > 0 {
 				m.msgScroll--
 			}
@@ -301,7 +497,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			if m.activeChatID != "" {
 				m.loadingMsgs = true
-				return m, loadMsgs(m.activeChatID)
+				return m, loadMsgs(m.activeChatID, false)
 			}
 		}
 	case focusChatList:
@@ -325,7 +521,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.loadingMsgs = true
 				m.focus = focusMessages
 				m.msgScroll = 0
-				return m, loadMsgs(c.ID)
+				return m, loadMsgs(c.ID, true)
 			}
 		case "/":
 			m.focus, m.searching = focusSearch, true
@@ -390,6 +586,7 @@ func (m model) View() string {
 			sel := i == m.chatIdx
 			dot := blueDot
 			if c.Mode == "p2p" { dot = greenDot }
+			if m.hasNewMsg[c.ID] { dot = redDot }
 
 			ts := formatTime(c.LastTime)
 			name := c.Name
@@ -421,67 +618,175 @@ func (m model) View() string {
 	leftContent := strings.Join(leftLines, "\n")
 
 	// --- Right panel: messages ---
-	inputBoxH := 3 // border + content + border
-	msgH := panelH - inputBoxH - 2 // minus input box height and its borders
+	// Left total = panelH + 2 (renderBox adds 2 for borders)
+	// Right = msgBox(msgH+2) + inputBox(1+2=3) = msgH+5 = panelH+2 → msgH = panelH-3
+	msgH := panelH - 3
 	var msgLines []string
+	var msgLineURLs []string // parallel: URL for each line (empty = no link)
+	addLine := func(line, url string) {
+		msgLines = append(msgLines, line)
+		msgLineURLs = append(msgLineURLs, url)
+	}
 	if m.loadingMsgs {
-		msgLines = append(msgLines, " "+m.spin.View()+" loading...")
+		addLine(" "+m.spin.View()+" loading...", "")
 	} else if len(m.msgs) == 0 && m.activeChatID == "" {
-		msgLines = append(msgLines, dimStyle.Render(" select a chat"))
+		addLine(dimStyle.Render(" select a chat"), "")
 	} else {
 		for _, msg := range m.msgs {
 			isMe := msg.SenderID == m.myOpenID
 			c := cleanContent(msg.Content, msg.MsgType)
 			switch msg.MsgType {
 			case "system":
-				msgLines = append(msgLines, dimStyle.Render(" --- "+c+" ---"), "")
+				addLine(dimStyle.Render(" --- "+c+" ---"), "")
+				addLine("", "")
 				continue
-			case "image":
-				c = "[image]"
 			case "file":
 				c = "[file]"
 			case "interactive":
 				c = "[card]"
+			case "image", "merge_forward":
+				// handled below
 			}
 			bar := blueBar
 			if isMe { bar = greenBar }
-			msgLines = append(msgLines, fmt.Sprintf(" %s %s  %s", bar, nameStyle.Render(msg.Sender), dimStyle.Render(formatTime(msg.Time))))
-			for _, wl := range wrapText(c, rightInner-5) {
-				msgLines = append(msgLines, " "+bar+" "+wl)
+			addLine(fmt.Sprintf(" %s %s  %s", bar, nameStyle.Render(msg.Sender), dimStyle.Render(formatTime(msg.Time))), "")
+
+			if msg.MsgType == "image" {
+				imgLink := "img:" + msg.ID + ":" + parseImageKey(msg.Content)
+				if m.imgLoading[msg.ID] {
+					addLine(" "+bar+" "+dimStyle.Render("[image: loading...]"), imgLink)
+				} else {
+					addLine(" "+bar+" "+linkPill.Render("[image]"), imgLink)
+				}
+			} else if msg.MsgType == "merge_forward" {
+				if subs := m.mergeCache[msg.ID]; len(subs) > 0 {
+					addLine(" "+bar+" "+dimStyle.Render("── forwarded ──"), "")
+					for _, sub := range subs {
+						sc := cleanContent(sub.Content, sub.MsgType)
+						if sub.MsgType == "image" {
+							sc = "[image]"
+						}
+						styled, u := linkifyLine(sc, m.docTitleCache)
+						addLine(" "+bar+"  "+nameStyle.Render(sub.Sender)+": "+styled, u)
+					}
+					addLine(" "+bar+" "+dimStyle.Render("───────────────"), "")
+				} else if m.mergeLoading[msg.ID] {
+					addLine(" "+bar+" "+dimStyle.Render("[forwarded: loading...]"), "")
+				} else {
+					addLine(" "+bar+" "+dimStyle.Render("[forwarded messages]"), "")
+				}
+			} else {
+				// Extract inline image keys from raw content before cleaning
+				inlineImgKey := parseImageKey(msg.Content)
+
+				// Replace URLs with pill labels BEFORE wrapping
+				var firstURL string
+				replaced := urlRe.ReplaceAllStringFunc(c, func(u string) string {
+					if firstURL == "" {
+						firstURL = u
+					}
+					return urlLabel(u, m.docTitleCache)
+				})
+				for _, wl := range wrapText(replaced, rightInner-5) {
+					lineLink := firstURL
+					styled := wl
+					// Style bracket pills like [wiki], [doc: xxx], [image]
+					if strings.Contains(wl, "[") {
+						styled = linkPillRe.ReplaceAllStringFunc(wl, func(p string) string {
+							return linkPill.Render(p)
+						})
+					}
+					// Make [image] clickable with inline image key
+					if strings.Contains(wl, "[image]") && inlineImgKey != "" {
+						lineLink = "img:" + msg.ID + ":" + inlineImgKey
+					}
+					addLine(" "+bar+" "+styled, lineLink)
+				}
 			}
-			msgLines = append(msgLines, "")
+			addLine("", "")
 		}
 	}
 
-	// Scroll: show last msgH lines
+	// Scroll: msgScroll=0 means bottom (newest), higher = further up (older)
 	if len(msgLines) > msgH {
-		start := len(msgLines) - msgH
-		if m.msgScroll < start {
-			start = max(0, m.msgScroll)
+		maxScroll := len(msgLines) - msgH
+		if m.msgScroll > maxScroll {
+			m.msgScroll = maxScroll
 		}
-		end := start + msgH
-		if end > len(msgLines) { end = len(msgLines) }
+		end := len(msgLines) - m.msgScroll
+		start := end - msgH
+		if start < 0 { start = 0 }
 		msgLines = msgLines[start:end]
+		msgLineURLs = msgLineURLs[start:end]
 	}
+	// Ensure links array matches what renderBox will actually display
+	if len(msgLineURLs) > msgH {
+		msgLineURLs = msgLineURLs[:msgH]
+	}
+	viewMsgLineLinks = msgLineURLs
 	msgContent := strings.Join(msgLines, "\n")
 
-	// Input
 	m.input.Width = rightInner - 4
-	inputContent := " > " + m.input.View()
 
 	// --- Render boxes ---
 	leftActive := m.focus == focusChatList || m.focus == focusSearch
 	leftPanel := renderBox(leftInner, panelH, leftContent, "Chats", leftActive)
 
-	rightTitle := m.activeChatName
-	if rightTitle == "" { rightTitle = "Messages" }
-	rightActive := m.focus == focusMessages || m.focus == focusInput
-	msgPanel := renderBox(rightInner, panelH-inputBoxH-1, msgContent, rightTitle, rightActive)
-	inputPanel := renderBox(rightInner, 1, inputContent, "", rightActive)
-	rightPanel := msgPanel + "\n" + inputPanel
+	var msgPanel, inputPanel string
+	if m.focus == focusImagePreview {
+		var previewContent string
+		if strings.HasPrefix(m.previewImgPath, "pending:") {
+			// Still downloading — show spinner
+			previewContent = "\n\n  " + m.spin.View() + " downloading image..."
+		} else if m.previewImgPath != "" {
+			if viewPreviewStr == "" {
+				s, _ := renderImageKitty(m.previewImgPath, rightInner-2, panelH-2)
+				viewPreviewStr = s
+			}
+			previewContent = viewPreviewStr
+		}
+		msgPanel = renderBox(rightInner, panelH-2, previewContent, "Image Preview", true)
+		inputPanel = renderBox(rightInner, 1, " "+dimStyle.Render("esc to go back"), "", true)
+	} else {
+		rightTitle := m.activeChatName
+		if rightTitle == "" { rightTitle = "Messages" }
+		rightActive := m.focus == focusMessages || m.focus == focusInput
+		msgPanel = renderBox(rightInner, msgH, msgContent, rightTitle, rightActive)
+		inputPanel = renderBox(rightInner, 1, " > "+m.input.View(), "", rightActive)
+	}
 
-	main := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
-	return main + "\n" + m.helpBar()
+	// Join left and right line by line to ensure exact alignment
+	leftSplit := strings.Split(leftPanel, "\n")
+	rightMsgSplit := strings.Split(msgPanel, "\n")
+	rightInputSplit := strings.Split(inputPanel, "\n")
+	rightSplit := append(rightMsgSplit, rightInputSplit...)
+
+	leftTotalW := leftW // expected visual width of left panel
+
+	var output strings.Builder
+	totalLines := max(len(leftSplit), len(rightSplit))
+	for i := 0; i < totalLines; i++ {
+		l, r := "", ""
+		if i < len(leftSplit) {
+			l = leftSplit[i]
+		}
+		if i < len(rightSplit) {
+			r = rightSplit[i]
+		}
+		// Pad left to consistent width
+		lw := lipgloss.Width(l)
+		if lw < leftTotalW {
+			l += strings.Repeat(" ", leftTotalW-lw)
+		}
+		output.WriteString(l + r + "\n")
+	}
+	output.WriteString(m.helpBar())
+	// Clear Kitty images when in preview mode (prevent stale overlays)
+	prefix := ""
+	if m.focus == focusImagePreview {
+		prefix = "\x1b_Ga=d\x1b\\"
+	}
+	return prefix + output.String()
 }
 
 // renderBox draws a rounded border box with optional title in the top border.
@@ -539,22 +844,37 @@ func (m model) helpBar() string {
 	add := func(k, d string) { parts = append(parts, helpKey.Render(k)+" "+dimStyle.Render(d)) }
 	switch m.focus {
 	case focusChatList:
-		add("q", "quit"); add("j/k", "nav"); add("enter", "open"); add("/", "search"); add("r", "refresh")
+		add("q", "quit"); add("↑/↓", "nav"); add("enter", "open"); add("/", "search"); add("r", "refresh")
 	case focusMessages:
-		add("esc", "back"); add("j/k", "scroll"); add("i", "input"); add("r", "refresh")
+		add("esc", "back"); add("↑/↓", "scroll"); add("i", "input"); add("r", "refresh")
 	case focusInput:
 		add("enter", "send"); add("esc", "back")
 	case focusSearch:
 		add("enter", "search"); add("esc", "cancel")
+	case focusImagePreview:
+		add("esc", "back")
 	}
 	return " " + strings.Join(parts, "  ")
 }
 
 // --- helpers ---
 
-// cleanContent strips HTML tags, normalizes image refs, etc.
+// hrefRe extracts href from <a> tags
+var hrefRe = regexp.MustCompile(`<a[^>]+href="([^"]*)"[^>]*>`)
+
+// cleanContent strips HTML tags but preserves link URLs.
 func cleanContent(s string, msgType string) string {
-	// Strip HTML tags
+	// Convert <a href="url">text</a> → text (url)
+	s = hrefRe.ReplaceAllStringFunc(s, func(tag string) string {
+		m := hrefRe.FindStringSubmatch(tag)
+		if len(m) >= 2 {
+			return "FEISHU_LINK_START:" + m[1] + ":"
+		}
+		return ""
+	})
+	s = strings.ReplaceAll(s, "</a>", "")
+
+	// Strip remaining HTML tags
 	result := []byte{}
 	inTag := false
 	for i := 0; i < len(s); i++ {
@@ -572,18 +892,95 @@ func cleanContent(s string, msgType string) string {
 	}
 	s = string(result)
 
+	// Convert link markers back: FEISHU_LINK_START:url:text → text url
+	for {
+		idx := strings.Index(s, "FEISHU_LINK_START:")
+		if idx < 0 {
+			break
+		}
+		rest := s[idx+len("FEISHU_LINK_START:"):]
+		endURL := strings.Index(rest, ":")
+		if endURL < 0 {
+			break
+		}
+		url := rest[:endURL]
+		s = s[:idx] + url + " " + rest[endURL+1:]
+	}
+
 	// Replace [Image: ...] with [image]
 	for {
 		idx := strings.Index(s, "[Image:")
-		if idx < 0 { break }
+		if idx < 0 {
+			break
+		}
 		end := strings.Index(s[idx:], "]")
-		if end < 0 { break }
+		if end < 0 {
+			break
+		}
 		s = s[:idx] + "[image]" + s[idx+end+1:]
 	}
 
-	// Trim whitespace
 	s = strings.TrimSpace(s)
 	return s
+}
+
+// linkify replaces URLs with styled pill labels.
+var urlRe = regexp.MustCompile(`https?://[^\s<>\]\)]+`)
+
+var linkPill = lipgloss.NewStyle().Foreground(blue).Underline(true)
+var linkPillRe = regexp.MustCompile(`\[[^\]]+\]`)
+
+// linkifyLine replaces URLs with styled pills and returns the first URL found.
+func linkifyLine(s string, docTitles map[string]string) (string, string) {
+	var firstURL string
+	result := urlRe.ReplaceAllStringFunc(s, func(u string) string {
+		if firstURL == "" {
+			firstURL = u
+		}
+		label := urlLabel(u, docTitles)
+		return linkPill.Render(label)
+	})
+	return result, firstURL
+}
+
+// docTokenRe extracts the token from feishu doc URLs
+var docTokenRe = regexp.MustCompile(`feishu\.cn/(?:docx|docs|wiki|sheets|base|slides|mindnotes)/([A-Za-z0-9]+)`)
+
+func extractDocToken(u string) (token, docType string) {
+	if strings.Contains(u, "/docx/") || strings.Contains(u, "/docs/") {
+		docType = "docx"
+	} else if strings.Contains(u, "/wiki/") {
+		docType = "wiki"
+	} else if strings.Contains(u, "/sheets/") || strings.Contains(u, "/base/") {
+		docType = "sheet"
+	} else if strings.Contains(u, "/slides/") {
+		docType = "slides"
+	} else if strings.Contains(u, "/mindnotes/") {
+		docType = "mindmap"
+	}
+	m := docTokenRe.FindStringSubmatch(u)
+	if len(m) >= 2 {
+		token = m[1]
+	}
+	return
+}
+
+func urlLabel(u string, docTitles map[string]string) string {
+	token, docType := extractDocToken(u)
+	if token != "" && docType != "" {
+		if title, ok := docTitles[token]; ok && title != "" {
+			return "[" + docType + ": " + title + "]"
+		}
+		return "[" + docType + "]"
+	}
+	if strings.Contains(u, "feishu.cn") || strings.Contains(u, "larksuite.com") {
+		return "[feishu]"
+	}
+	parts := strings.SplitN(u, "/", 4)
+	if len(parts) >= 3 {
+		return "[" + parts[2] + "]"
+	}
+	return "[link]"
 }
 
 func truncStr(s string, w int) string {
@@ -612,6 +1009,28 @@ func wrapText(s string, w int) []string {
 	if start < len(runes) { lines = append(lines, string(runes[start:])) }
 	if len(lines) == 0 { lines = []string{""} }
 	return lines
+}
+
+// mergeMessages merges new messages with old ones, preserving sender names from old.
+func mergeMessages(old, new []Message) []Message {
+	if len(old) == 0 {
+		return new
+	}
+	oldByID := make(map[string]Message, len(old))
+	for _, m := range old {
+		oldByID[m.ID] = m
+	}
+	for i, m := range new {
+		if prev, ok := oldByID[m.ID]; ok {
+			if m.Sender == "" && prev.Sender != "" {
+				new[i].Sender = prev.Sender
+			}
+			if m.SenderID == "" && prev.SenderID != "" {
+				new[i].SenderID = prev.SenderID
+			}
+		}
+	}
+	return new
 }
 
 func min(a, b int) int { if a < b { return a }; return b }
