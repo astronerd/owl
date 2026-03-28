@@ -42,8 +42,6 @@ var (
 // View() is a value receiver so model mutations there don't persist.
 var (
 	viewMsgLineLinks []string
-	viewImgRendered  = make(map[string]string)
-	viewImgRows      = make(map[string]int)
 	viewPreviewStr   string
 )
 
@@ -1027,8 +1025,6 @@ func mergeMessages(old, new []Message) []Message {
 	return new
 }
 
-func min(a, b int) int { if a < b { return a }; return b }
-func max(a, b int) int { if a > b { return a }; return b }
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())

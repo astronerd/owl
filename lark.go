@@ -139,7 +139,7 @@ func getP2PChats(myOpenID string, limit int) []Chat {
 
 func getMessages(chatID string, limit int) []Message {
 	r, err := runLarkCLI("im", "+chat-messages-list", "--as", "user",
-		"--chat-id", chatID, "--page-size", string(rune('0'+limit)),
+		"--chat-id", chatID, "--page-size", itoa(limit),
 		"--sort", "desc", "--format", "json")
 	if err != nil {
 		return nil
@@ -167,17 +167,6 @@ func getMessages(chatID string, limit int) []Message {
 	return msgs
 }
 
-func getMessagesStr(chatID string, limit int) []Message {
-	limitStr := "30"
-	if limit < 10 {
-		limitStr = string(rune('0' + limit))
-	} else if limit <= 50 {
-		limitStr = strings.TrimLeft(json.Number(json.Number(string(rune('0'+limit/10))).String()+json.Number(string(rune('0'+limit%10))).String()).String(), "0")
-	}
-	_ = limitStr
-	// Just use the proper way
-	return getMessagesPaged(chatID, limit)
-}
 
 func getMessagesPaged(chatID string, limit int) []Message {
 	r, err := runLarkCLI("im", "+chat-messages-list", "--as", "user",
